@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .checks import run_check
 from .judge import judge
-from .llm import chat
+from .llm import LAST_USAGE, chat
 
 AXES = ["instruction_retention", "inference_memory", "versioned_editing", "self_coherence"]
 DEFAULT_MODELS = ["groq:openai/gpt-oss-20b", "groq:qwen/qwen3.8-27b", "groq:allam-2-7b"]
@@ -32,6 +32,19 @@ def grade(case, reply, judge_model):
     return ok, notes
 
 
+def _timing(u):
+    if not u:
+        return {}
+    return {"queue_s": round(u.get("queue_time", 0), 3), "total_s": round(u.get("total_time", 0), 3),
+            "completion_tokens": u.get("completion_tokens", 0),
+            "tok_per_s": round(u["completion_tokens"] / u["completion_time"], 1) if u.get("completion_time") else None}
+
+
+def _pct(xs, q):
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, int(round(q * (len(xs) - 1))))] if xs else None
+
+
 def safe_name(model):
     return model.split(":", 1)[-1].replace("/", "_")
 
@@ -50,25 +63,37 @@ def run(args):
             t0 = time.time()
             try:
                 reply = chat(model, case["turns"])
+                timing = _timing(LAST_USAGE)  # grab it before the judge call overwrites it
                 ok, notes = grade(case, reply, args.judge)
             except Exception as e:  # keep going, one broken call shouldn't kill the run
-                reply, ok, notes = "", False, [f"error: {e}"]
+                reply, ok, notes, timing = "", False, [f"error: {e}"], {}
             rows.append({"model": model, "id": case["id"], "axis": case["axis"], "title": case["title"],
-                         "passed": ok, "reply": reply, "notes": notes,
+                         "passed": ok, "reply": reply, "notes": notes, "timing": timing,
                          "seconds": round(time.time() - t0, 1)})
             print(f"  {'PASS' if ok else 'FAIL'}  {case['id']:6} {case['title']}")
-        with open(out_dir / f"{safe_name(model)}.jsonl", "w", encoding="utf-8") as f:
+        path = out_dir / f"{safe_name(model)}.jsonl"
+        if args.only and path.exists():
+            # partial re-run: replace just these cases, keep the rest of the earlier results
+            fresh = {r["id"]: r for r in rows}
+            old = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+            rows = [fresh.pop(r["id"], r) for r in old] + list(fresh.values())
+        with open(path, "w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     report(out_dir, args.judge)
 
 
-def report(out_dir, judge_model=None):
+def report(out_dir, judge_model=DEFAULT_JUDGE):
     out_dir = Path(out_dir)
-    runs = {}
+    runs, skipped = {}, []
     for p in sorted(out_dir.glob("*.jsonl")):
         rows = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+        # API errors (e.g. rate limits) say nothing about the model, so they're left out of the scores
+        errored = [r for r in rows if any(n.startswith("error:") for n in r["notes"])]
+        if errored:
+            skipped.append((rows[0].get("model", p.stem), [r["id"] for r in errored]))
+        rows = [r for r in rows if r not in errored]
         runs[rows[0].get("model", p.stem) if rows else p.stem] = rows
 
     lines = ["# Results", ""]
@@ -83,6 +108,24 @@ def report(out_dir, judge_model=None):
         cells = [f"{sum(v)}/{len(v)}" for v in (by_axis[a] for a in AXES)]
         total = sum(r["passed"] for r in rows)
         lines.append(f"| `{model}` | " + " | ".join(cells) + f" | **{total}/{len(rows)}** |")
+
+    if skipped:
+        lines += ["", "Not scored (API error during the run, re-run pending): "
+                  + "; ".join(f"`{m}`: {', '.join(ids)}" for m, ids in skipped)]
+    has_timing = any(r.get("timing") for rows in runs.values() for r in rows)
+    lines += [] if not has_timing else ["", "## Responsiveness", "",
+              "Groq server-side timings for the model's final reply (judge calls excluded). `total` is time spent "
+              "processing the request; `queue` is time waiting in Groq's queue before that.", "",
+              "| model | median total (s) | p95 total (s) | median queue (s) | median output tok/s | median output tokens |",
+              "|---|---|---|---|---|---|"]
+    for model, rows in runs.items() if has_timing else []:
+        t = [r["timing"] for r in rows if r.get("timing")]
+        if not t:
+            continue
+        tps = [x["tok_per_s"] for x in t if x.get("tok_per_s")]
+        lines.append(f"| `{model}` | {_pct([x['total_s'] for x in t], .5):.2f} | {_pct([x['total_s'] for x in t], .95):.2f} | "
+                     f"{_pct([x['queue_s'] for x in t], .5):.2f} | {_pct(tps, .5) or '-'} | "
+                     f"{_pct([x['completion_tokens'] for x in t], .5)} |")
 
     lines += ["", "## Failures", ""]
     for model, rows in runs.items():

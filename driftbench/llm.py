@@ -40,6 +40,9 @@ def _groq_keys():
 
 
 _key_idx = 0
+# Server-side timing of the most recent successful Groq call (seconds). Measured by Groq,
+# so it doesn't include time we spent waiting on rate limits.
+LAST_USAGE = {}
 
 
 def _post(url, payload, headers, timeout):
@@ -69,18 +72,21 @@ def chat(model, messages, temperature=0.0, max_tokens=2048, timeout=300):
         if name.startswith("openai/gpt-oss"):
             # gpt-oss thinks before answering; low effort keeps us inside the 8k tokens/min free tier
             payload["reasoning_effort"] = "low"
-        for attempt in range(40):
+        deadline = time.time() + 900  # rate limits are shared across runs, so be patient
+        for attempt in range(10_000):
             key = keys[_key_idx % len(keys)]
             try:
                 data = _post(GROQ_URL, payload, {"Authorization": f"Bearer {key}"}, timeout)
                 break
             except urllib.error.HTTPError as e:
-                if e.code in (429, 500, 502, 503) and attempt < 39:
+                if e.code in (429, 500, 502, 503) and time.time() < deadline:
                     _key_idx += 1  # spread load across keys (only helps if they are on different accounts)
-                    time.sleep(float(e.headers.get("retry-after") or min(60, 2 ** attempt * 3)) + 1)
+                    time.sleep(max(float(e.headers.get("retry-after") or 0), min(30, 2 ** min(attempt, 5))) + 1)
                     continue
                 raise
         text = data["choices"][0]["message"]["content"] or ""
+        LAST_USAGE.clear()
+        LAST_USAGE.update(data.get("usage") or {})
 
     # reasoning models sometimes leak their scratchpad, drop it before grading
     return THINK_RE.sub("", text).strip()

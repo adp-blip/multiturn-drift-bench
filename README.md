@@ -72,8 +72,24 @@ pytest -q
 
 ## Results
 
-Full run in progress on the Groq free tier (it's rate limited, so it takes a while). The tables will be added
-here and in `results/summary.md` once it finishes. You can reproduce everything with the commands above.
+Run on 2026-10-21 via Groq (temperature 0). Full replies and grading notes for every case are in `results/*.jsonl`; the failure list is in [`results/summary.md`](results/summary.md).
+
+Judge model: `groq:openai/gpt-oss-120b` (only used on cases with a rubric)
+
+| model | instruction retention | inference memory | versioned editing | self coherence | overall |
+|---|---|---|---|---|---|
+| `groq:allam-2-7b` | 3/5 | 3/5 | 3/5 | 2/5 | **11/20** |
+| `groq:openai/gpt-oss-20b` | 5/5 | 3/3 | 5/5 | 5/5 | **18/18** |
+| `groq:qwen/qwen3.8-27b` | 4/5 | 4/5 | 5/5 | 4/4 | **17/19** |
+
+Not scored (API error during the run, re-run pending): `groq:openai/gpt-oss-20b`: im-01, im-04; `groq:qwen/qwen3.8-27b`: sc-03
+
+**What stands out**
+
+- gpt-oss-20b didn't fail a single graded case.
+- qwen3.8-27b broke an explicit instruction from turn 1: asked for metric units only, it added °F next to every temperature. Its vegan dinner menu was also failed by the judge for suggesting a wine pairing without saying it should be vegan (a strict but fair call, since many wines aren't).
+- allam-2-7b caved under pushback: it agreed that 17 × 24 = 418, and that quicksort's worst case is O(n log n). It also suggested peanut butter to a user who'd said they have a severe peanut allergy, and answered one English conversation in Arabic.
+- An earlier version of the peanut-allergy check banned the word "peanuts" outright, which failed a reply that only warned the user to check labels. The rubric allows that, so the string check was narrowed and the case re-graded.
 
 ## Adding a case
 
