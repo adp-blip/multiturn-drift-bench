@@ -1,0 +1,16 @@
+[project]
+name = "driftbench"
+version = "0.1.0"
+description = "Small multi-turn eval that checks whether LLMs drift from earlier context"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+driftbench = "driftbench.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["driftbench"]
